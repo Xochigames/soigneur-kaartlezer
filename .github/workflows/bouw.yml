@@ -1,0 +1,135 @@
+name: Bouwen
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows-installatieprogramma
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Pakketten
+        run: python -m pip install --upgrade pip pyinstaller pyscard
+      - name: Tests
+        run: python -m unittest discover -s tests
+      - name: Programma bouwen
+        run: pyinstaller --noconfirm --noconsole --onedir --name Soigneur-kaartlezer --collect-all smartcard start.py
+      - name: Inno Setup installeren
+        run: choco install innosetup -y --no-progress
+      - name: Installatieprogramma bouwen
+        run: |
+          $v = python start.py --versie
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersie=$v" windows\soigneur-kaartlezer.iss
+          if (-not (Test-Path dist\Soigneur-kaartlezer-windows.exe)) { throw "installatieprogramma ontbreekt" }
+      - name: Proef (installeren, draaien, verwijderen)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Vraag($pad, $origin) {
+            Invoke-WebRequest -Uri "http://127.0.0.1:47011$pad" -Headers @{ Origin = $origin } -SkipHttpErrorCheck -UseBasicParsing
+          }
+          Start-Process -FilePath (Resolve-Path dist\Soigneur-kaartlezer-windows.exe) -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\Soigneur kaartlezer'
+          if (-not (Test-Path "$dir\Soigneur-kaartlezer.exe")) { throw 'Niet geinstalleerd' }
+          $lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Soigneur kaartlezer.lnk'
+          if (-not (Test-Path $lnk)) { throw 'Geen snelkoppeling in Opstarten' }
+          $ok = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            try { $r = Vraag '/status' 'https://mijnsoigneur.be'; if ($r.StatusCode -eq 200 -and $r.Content -match '"ok": true') { $ok = $true; break } } catch { }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $ok) { throw 'De kaartlezer antwoordt niet' }
+          Write-Host "status: $($r.Content)"
+          $k = Vraag '/kaart' 'https://mijnsoigneur.be'
+          Write-Host "kaart: $($k.StatusCode) $($k.Content)"
+          if ($k.StatusCode -ne 409) { throw "Zonder lezer hoort /kaart 409 te geven, niet $($k.StatusCode)" }
+          $v = Vraag '/status' 'https://kwaad.example'
+          if ($v.StatusCode -ne 403) { throw "Een vreemde website moet geweigerd worden (403), kreeg $($v.StatusCode)" }
+          & "$dir\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+          for ($i = 0; $i -lt 30 -and (Test-Path $dir); $i++) { Start-Sleep -Seconds 1 }
+          if (Test-Path $dir) { throw 'Map is niet verwijderd' }
+          if (Test-Path $lnk) { throw 'Snelkoppeling is niet verwijderd' }
+          if (Get-Process -Name 'Soigneur-kaartlezer' -ErrorAction SilentlyContinue) { throw 'Programma draait nog' }
+          Write-Host 'Windows-proef geslaagd'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/Soigneur-kaartlezer-windows.exe
+
+  mac:
+    name: Mac-programma
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python van python.org (werkt op Apple-chips en Intel)
+        run: |
+          curl -fsSL -o python.pkg https://www.python.org/ftp/python/3.12.8/python-3.12.8-macos11.pkg
+          sudo installer -pkg python.pkg -target /
+      - name: Bouwen
+        run: PYTHON=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3 ./bouw_mac.sh
+      - name: Proef (installeren, draaien, verwijderen)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dl" "$RUNNER_TEMP/thuis"
+          ditto -x -k dist/Soigneur-kaartlezer-mac.zip "$RUNNER_TEMP/dl"
+          APP="$RUNNER_TEMP/dl/Soigneur kaartlezer.app"
+          echo "Onderdelen: $(lipo -archs "$APP/Contents/MacOS/Soigneur kaartlezer")"
+          lipo -archs "$APP/Contents/MacOS/Soigneur kaartlezer" | grep -q arm64
+          lipo -archs "$APP/Contents/MacOS/Soigneur kaartlezer" | grep -q x86_64
+          export SOIGNEUR_THUIS="$RUNNER_TEMP/thuis" SOIGNEUR_ZONDER_DIALOOG=1 SOIGNEUR_ZONDER_LAUNCHD=1 SOIGNEUR_EID_PORT=47031 SOIGNEUR_ORIGINS=https://mijnsoigneur.be
+          "$APP/Contents/MacOS/Soigneur kaartlezer"
+          test -d "$SOIGNEUR_THUIS/Applications/Soigneur kaartlezer.app"
+          ok=0
+          for i in $(seq 1 20); do
+            if curl -fsS -H "Origin: https://mijnsoigneur.be" http://127.0.0.1:47031/status | grep -q '"ok": true'; then ok=1; break; fi
+            sleep 1
+          done
+          [ "$ok" = 1 ] || { echo "De kaartlezer antwoordt niet"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Origin: https://mijnsoigneur.be" http://127.0.0.1:47031/kaart)
+          echo "kaart: $code"
+          [ "$code" = 409 ] || { echo "Zonder lezer hoort /kaart 409 te geven"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Origin: https://kwaad.example" http://127.0.0.1:47031/status)
+          [ "$code" = 403 ] || { echo "Een vreemde website moet geweigerd worden"; exit 1; }
+          "$SOIGNEUR_THUIS/Applications/Soigneur kaartlezer.app/Contents/MacOS/Soigneur kaartlezer" --verwijderen
+          test ! -e "$SOIGNEUR_THUIS/Applications/Soigneur kaartlezer.app"
+          echo "Mac-proef geslaagd"
+      - name: Proef als Intel-Mac (Rosetta)
+        continue-on-error: true
+        run: |
+          APP="$RUNNER_TEMP/dl/Soigneur kaartlezer.app"
+          arch -x86_64 "$APP/Contents/MacOS/Soigneur kaartlezer" --versie
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: dist/Soigneur-kaartlezer-mac.zip
+
+  uitgave:
+    name: Uitgave
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, mac]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: bestanden
+          merge-multiple: true
+      - name: Uitgave maken
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp soigneur_eid.py bestanden/soigneur_eid.py
+          gh release create "$GITHUB_REF_NAME" bestanden/* --title "Soigneur kaartlezer ${GITHUB_REF_NAME#v}" --generate-notes
