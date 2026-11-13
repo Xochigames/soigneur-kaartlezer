@@ -69,7 +69,7 @@ jobs:
 
   mac:
     name: Mac-programma
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Python van python.org (werkt op Apple-chips en Intel)

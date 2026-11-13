@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import mac_install as mi  # noqa: E402
 
 
+@unittest.skipIf(sys.platform == "win32", "macOS-logica met macOS-paden")
 class ModusTest(unittest.TestCase):
     def setUp(self):
         self.thuis = tempfile.mkdtemp()
@@ -43,6 +44,7 @@ class ModusTest(unittest.TestCase):
         self.assertIsNone(mi.huidige_app("/usr/bin/python3"))
 
 
+@unittest.skipIf(sys.platform == "win32", "macOS-logica met macOS-paden")
 class PlistTest(unittest.TestCase):
     def test_plist_start_het_programma_bij_aanmelden(self):
         data = plistlib.loads(mi.maak_plist(Path("/x/y/Soigneur kaartlezer"), {}))
