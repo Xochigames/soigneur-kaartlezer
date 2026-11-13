@@ -14,6 +14,7 @@ jobs:
   windows:
     name: Windows-installatieprogramma
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,7 +40,10 @@ jobs:
           function Vraag($pad, $origin) {
             Invoke-WebRequest -Uri "http://127.0.0.1:47011$pad" -Headers @{ Origin = $origin } -SkipHttpErrorCheck -UseBasicParsing
           }
-          Start-Process -FilePath (Resolve-Path dist\Soigneur-kaartlezer-windows.exe) -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          # Niet "-Wait" gebruiken: dat wacht ook op het programma dat het installatieprogramma start en nooit stopt.
+          $p = Start-Process -FilePath (Resolve-Path dist\Soigneur-kaartlezer-windows.exe) -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru
+          if (-not $p.WaitForExit(180000)) { throw 'De installatie duurt te lang' }
+          Write-Host "installatieprogramma klaar, code $($p.ExitCode)"
           $dir = Join-Path $env:LOCALAPPDATA 'Programs\Soigneur kaartlezer'
           if (-not (Test-Path "$dir\Soigneur-kaartlezer.exe")) { throw 'Niet geinstalleerd' }
           $lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Soigneur kaartlezer.lnk'
@@ -56,7 +60,8 @@ jobs:
           if ($k.StatusCode -ne 409) { throw "Zonder lezer hoort /kaart 409 te geven, niet $($k.StatusCode)" }
           $v = Vraag '/status' 'https://kwaad.example'
           if ($v.StatusCode -ne 403) { throw "Een vreemde website moet geweigerd worden (403), kreeg $($v.StatusCode)" }
-          & "$dir\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+          $u = Start-Process -FilePath "$dir\unins000.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru
+          $u.WaitForExit(120000) | Out-Null
           for ($i = 0; $i -lt 30 -and (Test-Path $dir); $i++) { Start-Sleep -Seconds 1 }
           if (Test-Path $dir) { throw 'Map is niet verwijderd' }
           if (Test-Path $lnk) { throw 'Snelkoppeling is niet verwijderd' }
@@ -70,6 +75,7 @@ jobs:
   mac:
     name: Mac-programma
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Python van python.org (werkt op Apple-chips en Intel)
